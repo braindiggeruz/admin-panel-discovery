@@ -11,6 +11,7 @@ import {
   Telescope,
 } from "lucide-react";
 import { lock } from "@/lib/gate";
+import { clearSession, getSession } from "@/services/auth";
 import CommandPalette from "@/components/CommandPalette";
 
 const nav = [
@@ -92,12 +93,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <div className="flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-ink-300">
               <CircleDot className="w-3 h-3 text-accent-mint animate-pulse" />
-              <span>Read-only · live</span>
+              <span>{getSession()?.email ?? "owner"}</span>
             </div>
-            <span className="mono text-ink-500">v0.2</span>
+            <span className="mono text-ink-500">v1.0</span>
           </div>
           <button
             onClick={() => {
+              clearSession();
               lock();
               location.reload();
             }}

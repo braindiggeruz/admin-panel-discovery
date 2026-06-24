@@ -41,6 +41,7 @@ import { useRealtimeTable } from "@/lib/realtime";
 import CountUp from "@/components/CountUp";
 import LiveFeed from "@/components/LiveFeed";
 import { useToast } from "@/components/Toast";
+import { fetchWalletsSummary } from "@/services/auth";
 
 export default function Overview() {
   const qc = useQueryClient();
@@ -221,6 +222,9 @@ export default function Overview() {
           tone="gold"
         />
       </div>
+
+      {/* Coin supply (via /api with service_role) */}
+      <CoinSupply />
 
       {/* Funnel */}
       <Funnel funnel={funnel.data} loading={funnel.isLoading} />
@@ -494,6 +498,53 @@ export default function Overview() {
     </div>
   );
 }
+
+function CoinSupply() {
+  const { data, isLoading } = useQuery({
+    queryKey: ["wallets-summary"],
+    queryFn: fetchWalletsSummary,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  if (isLoading || !data) return null;
+  const t = data.totals;
+  return (
+    <div className="panel p-6 relative overflow-hidden">
+      <div className="absolute -right-12 -top-12 w-72 h-72 rounded-full bg-gradient-to-br from-gold-400/15 to-transparent blur-3xl pointer-events-none" />
+      <div className="relative flex flex-wrap items-end gap-6 justify-between">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-gold-300/80 mb-1">
+            Coin в системе · live через /api
+          </div>
+          <div className="display-title text-4xl text-gold-200">
+            <CountUp value={t.balance} format={fmtCoin} /> <span className="text-ink-400 text-lg">Coin</span>
+          </div>
+          <div className="text-xs text-ink-400 mt-1">
+            на {fmtNum(data.walletCount)} кошельках · в locked{" "}
+            <span className="text-accent-sky mono">
+              <CountUp value={t.locked} format={fmtCoin} />
+            </span>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="panel-soft p-3 min-w-[120px]">
+            <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Выиграно всего</div>
+            <div className="mt-1 text-xl text-accent-mint mono">
+              <CountUp value={t.won} format={fmtCoin} />
+            </div>
+          </div>
+          <div className="panel-soft p-3 min-w-[120px]">
+            <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Проиграно всего</div>
+            <div className="mt-1 text-xl text-accent-rose/90 mono">
+              <CountUp value={t.lost} format={fmtCoin} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function Funnel({
   funnel,

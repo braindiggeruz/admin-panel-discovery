@@ -1,7 +1,7 @@
 import { Route, Routes, Navigate, useLocation } from "react-router-dom";
 import { useState, useEffect } from "react";
 import Layout from "@/components/Layout";
-import Gate from "@/components/Gate";
+import LoginScreen from "@/components/LoginScreen";
 import Overview from "@/pages/Overview";
 import Players from "@/pages/Players";
 import PlayerDetail from "@/pages/PlayerDetail";
@@ -11,16 +11,17 @@ import Economy from "@/pages/Economy";
 import SystemHealth from "@/pages/SystemHealth";
 import Roadmap from "@/pages/Roadmap";
 import Insights from "@/pages/Insights";
-import { isUnlocked } from "@/lib/gate";
+import { getSession } from "@/services/auth";
 
 export default function App() {
-  const [unlocked, setUnlocked] = useState(() => isUnlocked());
+  const [authed, setAuthed] = useState(() => !!getSession());
   const loc = useLocation();
   useEffect(() => {
-    setUnlocked(isUnlocked());
-  }, [loc]);
+    const ok = !!getSession();
+    if (ok !== authed) setAuthed(ok);
+  }, [loc, authed]);
 
-  if (!unlocked) return <Gate onUnlocked={() => setUnlocked(true)} />;
+  if (!authed) return <LoginScreen onSuccess={() => setAuthed(true)} />;
 
   return (
     <Layout>
@@ -31,8 +32,8 @@ export default function App() {
         <Route path="/players/:id" element={<PlayerDetail />} />
         <Route path="/matches" element={<Matches />} />
         <Route path="/matches/:id" element={<MatchDetail />} />
-        <Route path="/economy" element={<Economy />} />
         <Route path="/insights" element={<Insights />} />
+        <Route path="/economy" element={<Economy />} />
         <Route path="/health" element={<SystemHealth />} />
         <Route path="/roadmap" element={<Roadmap />} />
         <Route path="*" element={<Navigate to="/overview" replace />} />
