@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AreaChart,
   Area,
@@ -17,22 +17,55 @@ import {
   Sparkles,
   TrendingUp,
   ArrowUpRight,
+  Wifi,
+  CircleDot,
 } from "lucide-react";
 import {
+  fetchActiveUsers,
+  fetchActivityHeatmap,
+  fetchFunnel,
   fetchGames,
+  fetchGamesTrend,
   fetchPlayers,
   fetchSignupTrend,
   fetchStakes,
   fetchTotals,
-  fetchGamesTrend,
 } from "@/services/admin";
-import { fmtCoin, fmtNum, fmtRelative, shortId, clsx } from "@/lib/format";
+import { fmtCoin, fmtNum, fmtRelative, clsx } from "@/lib/format";
 import { Kpi, PageHeader, Section, Skeleton, Empty } from "@/components/ui";
 import { Link } from "react-router-dom";
 import { GAME_URL } from "@/lib/supabase";
+import { useRealtimeTable } from "@/lib/realtime";
 
 export default function Overview() {
-  const totals = useQuery({ queryKey: ["totals"], queryFn: fetchTotals });
+  const qc = useQueryClient();
+
+  // Realtime: when games or moves change, invalidate everything
+  useRealtimeTable("games", () => {
+    qc.invalidateQueries({ queryKey: ["games", "active"] });
+    qc.invalidateQueries({ queryKey: ["games", "recent"] });
+    qc.invalidateQueries({ queryKey: ["totals"] });
+  });
+  useRealtimeTable("moves", () => {
+    qc.invalidateQueries({ queryKey: ["games", "active"] });
+    qc.invalidateQueries({ queryKey: ["totals"] });
+  });
+  useRealtimeTable("public_profiles", () => {
+    qc.invalidateQueries({ queryKey: ["active-users"] });
+  });
+
+  const totals = useQuery({ queryKey: ["totals"], queryFn: fetchTotals, refetchInterval: 30_000 });
+  const activeUsers = useQuery({
+    queryKey: ["active-users"],
+    queryFn: fetchActiveUsers,
+    refetchInterval: 30_000,
+  });
+  const funnel = useQuery({ queryKey: ["funnel"], queryFn: fetchFunnel, refetchInterval: 60_000 });
+  const heatmap = useQuery({
+    queryKey: ["heatmap"],
+    queryFn: () => fetchActivityHeatmap(14),
+    refetchInterval: 60_000,
+  });
   const signup = useQuery({ queryKey: ["signup-trend"], queryFn: () => fetchSignupTrend(14) });
   const games = useQuery({ queryKey: ["games-trend"], queryFn: () => fetchGamesTrend(14) });
   const top = useQuery({
@@ -41,7 +74,7 @@ export default function Overview() {
   });
   const live = useQuery({
     queryKey: ["games", "active"],
-    queryFn: () => fetchGames({ status: "playing", limit: 6 }),
+    queryFn: () => fetchGames({ status: "playing", limit: 8 }),
   });
   const recent = useQuery({
     queryKey: ["games", "recent"],
@@ -58,19 +91,29 @@ export default function Overview() {
     .filter((x) => x.payout_status === "paid")
     .reduce((s, x) => s + Number(x.pot_amount || 0), 0);
   const commission = Math.round(paidPot * 0.05);
+  const liveCount = live.data?.length ?? 0;
 
   return (
     <div className="space-y-8">
       <PageHeader
-        eyebrow="Live · Production"
+        eyebrow={
+          <span className="inline-flex items-center gap-2">
+            <span className={clsx("relative flex h-2 w-2")}>
+              <span className="absolute inset-0 rounded-full bg-accent-mint opacity-75 animate-ping" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-accent-mint" />
+            </span>
+            Live · Production · Realtime
+          </span>
+        }
         title="Командный центр"
-        description="Наблюдение за игроками, матчами и экономикой Шашек Рояль. Все данные — из production Supabase, режим read-only."
+        description="Каждый виджет — живая Supabase-таблица. Подписки realtime обновляют активные партии за секунду. Никаких моков."
         actions={
           <a
             href={GAME_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="btn-ghost"
+            data-testid="open-game-btn"
           >
             Открыть игру <ArrowUpRight className="w-3.5 h-3.5" />
           </a>
@@ -83,45 +126,62 @@ export default function Overview() {
           icon={<Users className="w-4 h-4" />}
           label="Игроки"
           value={totals.isLoading ? "…" : fmtNum(t?.players ?? 0)}
-          hint={`Всего профилей в базе`}
+          hint={
+            <span>
+              <span className="text-accent-mint">{fmtNum(t?.playedAtLeastOnce ?? 0)}</span>{" "}
+              сыграли хотя бы 1 партию
+            </span>
+          }
           tone="gold"
         />
         <Kpi
+          icon={<Wifi className="w-4 h-4" />}
+          label="Активность"
+          value={activeUsers.isLoading ? "…" : fmtNum(activeUsers.data?.d1 ?? 0)}
+          hint={
+            <span>
+              <span className="text-accent-mint">DAU</span> ·{" "}
+              {fmtNum(activeUsers.data?.d7 ?? 0)} <span className="text-ink-500">WAU</span> ·{" "}
+              {fmtNum(activeUsers.data?.d30 ?? 0)} <span className="text-ink-500">MAU</span>
+            </span>
+          }
+          tone="mint"
+        />
+        <Kpi
           icon={<Swords className="w-4 h-4" />}
-          label="Матчи всего"
+          label="Партии всего"
           value={totals.isLoading ? "…" : fmtNum(t?.games ?? 0)}
           hint={
             <span>
-              <span className="text-accent-mint">{fmtNum(t?.active ?? 0)}</span> сейчас активны ·{" "}
-              <span className="text-ink-300">{fmtNum(t?.finished ?? 0)}</span> завершены
+              <span className={liveCount > 0 ? "text-accent-mint" : "text-ink-400"}>
+                {fmtNum(liveCount)}
+              </span>{" "}
+              сейчас · {fmtNum(t?.finished ?? 0)} завершено
             </span>
           }
         />
         <Kpi
           icon={<Coins className="w-4 h-4" />}
-          label="Ставки (комнаты)"
-          value={totals.isLoading ? "…" : fmtNum(t?.stakes ?? 0)}
+          label="Coin в обороте"
+          value={fmtCoin(totalPot)}
           hint={
             <span>
-              Объём pot:{" "}
-              <span className="text-gold-200 mono">{fmtCoin(totalPot)}</span> Coin
+              комиссия ≈ <span className="text-gold-300 mono">{fmtCoin(commission)}</span> по{" "}
+              {fmtNum(t?.stakes ?? 0)} ставочным играм
             </span>
           }
-        />
-        <Kpi
-          icon={<Activity className="w-4 h-4" />}
-          label="Ходы (всего)"
-          value={totals.isLoading ? "…" : fmtNum(t?.movesSeen ?? 0)}
-          hint="Серверная партия: server-authoritative engine"
-          tone="mint"
+          tone="gold"
         />
       </div>
+
+      {/* Funnel */}
+      <Funnel funnel={funnel.data} loading={funnel.isLoading} />
 
       {/* Trends */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Section
           title="Регистрации"
-          description="Новые игроки за последние 14 дней"
+          description="Новые игроки за 14 дней"
           right={
             <div className="chip-gold">
               <Sparkles className="w-3 h-3" /> trend
@@ -157,13 +217,7 @@ export default function Overview() {
                     }}
                     labelStyle={{ color: "#E9BC56" }}
                   />
-                  <Area
-                    type="monotone"
-                    dataKey="count"
-                    stroke="#E9BC56"
-                    strokeWidth={2}
-                    fill="url(#gSignup)"
-                  />
+                  <Area type="monotone" dataKey="count" stroke="#E9BC56" strokeWidth={2} fill="url(#gSignup)" />
                 </AreaChart>
               </ResponsiveContainer>
             )}
@@ -172,7 +226,7 @@ export default function Overview() {
 
         <Section
           title="Завершённые матчи"
-          description="Партии за последние 14 дней"
+          description="За последние 14 дней"
           right={
             <div className="chip-mint">
               <TrendingUp className="w-3 h-3" /> activity
@@ -211,6 +265,18 @@ export default function Overview() {
         </Section>
       </div>
 
+      {/* Activity heatmap */}
+      <Section
+        title="Когда играют"
+        description="Тепловая карта ходов по дням недели и часам (14 дней, UTC)"
+      >
+        {heatmap.isLoading ? (
+          <Skeleton rows={7} />
+        ) : (
+          <Heatmap data={heatmap.data ?? []} />
+        )}
+      </Section>
+
       {/* 3-col bottom */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Section
@@ -224,11 +290,11 @@ export default function Overview() {
         >
           {top.isLoading ? (
             <Skeleton />
-          ) : (top.data ?? []).length === 0 ? (
+          ) : (top.data?.rows ?? []).length === 0 ? (
             <Empty message="Нет данных" icon={<Users className="w-8 h-8" />} />
           ) : (
             <ol className="space-y-1.5">
-              {(top.data ?? []).map((p, i) => (
+              {(top.data?.rows ?? []).map((p, i) => (
                 <li key={p.id}>
                   <Link
                     to={`/players/${p.id}`}
@@ -252,7 +318,7 @@ export default function Overview() {
                     <div className="flex-1 min-w-0">
                       <div className="text-sm text-ink-100 truncate">{p.nickname}</div>
                       <div className="text-[11px] text-ink-500">
-                        {fmtNum(p.total_games)} матчей · стрик {p.best_win_streak ?? 0}
+                        {fmtNum(p.total_games)} партий · стрик {p.best_win_streak ?? 0}
                       </div>
                     </div>
                     <div className="mono text-sm text-gold-200">{fmtNum(p.rating)}</div>
@@ -265,14 +331,19 @@ export default function Overview() {
 
         <Section
           title="Сейчас играют"
-          description="Активные комнаты"
-          right={<span className="chip-mint">live</span>}
+          description={liveCount > 0 ? `${liveCount} активных комнат` : "Активные комнаты"}
+          right={
+            <span className={liveCount > 0 ? "chip-mint" : "chip-mute"}>
+              <CircleDot className={clsx("w-3 h-3", liveCount > 0 && "animate-pulse")} />
+              {liveCount > 0 ? "live" : "тихо"}
+            </span>
+          }
         >
           {live.isLoading ? (
             <Skeleton />
           ) : (live.data ?? []).length === 0 ? (
             <Empty
-              message="Никто не играет прямо сейчас"
+              message="Никто не играет прямо сейчас. Когда кто-то начнёт — здесь загорится за секунду."
               icon={<Swords className="w-8 h-8" />}
             />
           ) : (
@@ -304,7 +375,7 @@ export default function Overview() {
 
         <Section
           title="Свежие итоги"
-          description="Последние завершённые партии"
+          description="Последние партии"
           right={
             <Link to="/matches" className="text-xs text-gold-300 hover:underline">
               Все →
@@ -326,9 +397,7 @@ export default function Overview() {
                     <div className="min-w-0">
                       <div className="mono text-xs text-ink-300 flex items-center gap-2">
                         {g.room_code}
-                        {g.winner === "white" && (
-                          <Crown className="w-3 h-3 text-gold-300" />
-                        )}
+                        {g.winner === "white" && <Crown className="w-3 h-3 text-gold-300" />}
                       </div>
                       <div className="text-[11px] text-ink-500 truncate">
                         {g.resign_reason ?? "—"} · {fmtRelative(g.updated_at)}
@@ -344,11 +413,7 @@ export default function Overview() {
                             : "bg-white/[0.03] border-white/10 text-ink-400",
                       )}
                     >
-                      {g.winner === "white"
-                        ? "белые"
-                        : g.winner === "black"
-                          ? "чёрные"
-                          : "ничья"}
+                      {g.winner === "white" ? "белые" : g.winner === "black" ? "чёрные" : "ничья"}
                     </span>
                   </Link>
                 </li>
@@ -357,72 +422,124 @@ export default function Overview() {
           )}
         </Section>
       </div>
-
-      {/* Economy callout */}
-      <div className="panel p-6 relative overflow-hidden">
-        <div className="absolute -right-10 -top-10 w-64 h-64 rounded-full bg-gradient-to-br from-gold-400/20 to-transparent blur-3xl pointer-events-none" />
-        <div className="relative grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.2em] text-gold-300/80 mb-2">
-              Экономика Coin
-            </div>
-            <h3 className="display-title text-2xl text-ink-50">
-              Выплачено игрокам<br />
-              <span className="text-gold-200">{fmtCoin(paidPot)}</span>{" "}
-              <span className="text-ink-400 text-base">Coin</span>
-            </h3>
-            <p className="text-xs text-ink-400 mt-2">
-              Сумма выплаченных pot’ов · 5% комиссия ≈{" "}
-              <span className="mono text-gold-300">{fmtCoin(commission)} Coin</span>
-            </p>
-          </div>
-          <div className="md:col-span-2 grid grid-cols-3 gap-3">
-            <EcoStat label="В ожидании" value={(stakes.data ?? []).filter((s) => s.escrow_status === "waiting").length} tone="gold" />
-            <EcoStat label="Заблокировано" value={(stakes.data ?? []).filter((s) => s.escrow_status === "locked").length} tone="sky" />
-            <EcoStat label="Возвращено" value={(stakes.data ?? []).filter((s) => s.escrow_status === "refunded").length} tone="rose" />
-          </div>
-        </div>
-        <div className="mt-5 text-[11px] text-ink-500">
-          Источник: <code className="mono text-ink-300">public.game_stakes</code> · room_code короткий код:{" "}
-          {(stakes.data ?? []).slice(0, 1).map((s) => (
-            <code key={s.id} className="mono text-ink-300">
-              {shortId(s.game_id, 8)}
-            </code>
-          ))}
-        </div>
-      </div>
     </div>
   );
 }
 
-function EcoStat({
-  label,
-  value,
-  tone,
+function Funnel({
+  funnel,
+  loading,
 }: {
-  label: string;
-  value: number;
-  tone: "gold" | "sky" | "rose";
+  funnel:
+    | { registered: number; played1: number; played5: number; stake1: number }
+    | undefined;
+  loading: boolean;
 }) {
+  const steps = [
+    { label: "Зарегистрировано", value: funnel?.registered ?? 0, tone: "ink" as const },
+    { label: "Сыграло ≥ 1 партии", value: funnel?.played1 ?? 0, tone: "gold" as const },
+    { label: "Сыграло ≥ 5 партий", value: funnel?.played5 ?? 0, tone: "mint" as const },
+    { label: "Сыграло ставочную", value: funnel?.stake1 ?? 0, tone: "rose" as const },
+  ];
+  const max = Math.max(1, steps[0].value);
   return (
-    <div className="panel-soft p-4">
-      <div className="text-[10px] uppercase tracking-[0.18em] text-ink-500">{label}</div>
-      <div
-        className={clsx(
-          "mt-2 display-title text-2xl",
-          tone === "gold" && "text-gold-200",
-          tone === "sky" && "text-accent-sky",
-          tone === "rose" && "text-accent-rose",
-        )}
-      >
-        {fmtNum(value)}
+    <Section
+      title="Воронка вовлечения"
+      description="От регистрации до первой ставки — как игроки погружаются"
+      right={
+        <div className="chip-gold">
+          <Activity className="w-3 h-3" /> live
+        </div>
+      }
+    >
+      {loading ? (
+        <Skeleton rows={4} />
+      ) : (
+        <div className="space-y-2.5">
+          {steps.map((s, i) => {
+            const pct = (s.value / max) * 100;
+            const conv = i === 0 ? 100 : (s.value / Math.max(1, steps[0].value)) * 100;
+            return (
+              <div key={s.label} className="grid grid-cols-[180px_1fr_auto] items-center gap-4">
+                <div className="text-sm text-ink-300">{s.label}</div>
+                <div className="relative h-7 rounded-md bg-white/[0.025] overflow-hidden">
+                  <div
+                    className={clsx(
+                      "absolute inset-y-0 left-0 transition-all rounded-md",
+                      s.tone === "ink" && "bg-gradient-to-r from-ink-600 to-ink-500",
+                      s.tone === "gold" && "bg-gradient-to-r from-gold-600 to-gold-300",
+                      s.tone === "mint" && "bg-gradient-to-r from-accent-mint/40 to-accent-mint",
+                      s.tone === "rose" && "bg-gradient-to-r from-accent-rose/30 to-accent-rose",
+                    )}
+                    style={{ width: `${Math.max(2, pct)}%` }}
+                  />
+                  <div className="absolute inset-y-0 left-3 flex items-center text-[12px] mono text-ink-50/95">
+                    {fmtNum(s.value)}
+                  </div>
+                </div>
+                <div className="text-[11px] mono text-ink-400 w-14 text-right">
+                  {conv.toFixed(1)}%
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function Heatmap({ data }: { data: number[][] }) {
+  const max = Math.max(1, ...data.flat());
+  const days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+  return (
+    <div className="space-y-1.5">
+      <div className="grid grid-cols-[24px_repeat(24,minmax(0,1fr))] gap-[2px] text-[9px] text-ink-500 mono">
+        <div />
+        {Array.from({ length: 24 }, (_, i) => (
+          <div key={i} className="text-center">
+            {i % 3 === 0 ? i : ""}
+          </div>
+        ))}
+      </div>
+      {data.map((row, r) => (
+        <div
+          key={r}
+          className="grid grid-cols-[24px_repeat(24,minmax(0,1fr))] gap-[2px]"
+        >
+          <div className="text-[10px] text-ink-500 mono pr-1 text-right">{days[r]}</div>
+          {row.map((v, c) => {
+            const intensity = v === 0 ? 0 : v / max;
+            const bg = v === 0
+              ? "rgba(255,255,255,0.03)"
+              : `rgba(212,162,58,${0.15 + intensity * 0.85})`;
+            return (
+              <div
+                key={c}
+                className="h-5 rounded-[3px] cursor-default"
+                style={{ background: bg }}
+                title={`${days[r]} ${c}:00 — ${v} ход(ов)`}
+              />
+            );
+          })}
+        </div>
+      ))}
+      <div className="flex items-center justify-end gap-1.5 pt-2 text-[10px] text-ink-500">
+        <span>меньше</span>
+        {[0.1, 0.25, 0.5, 0.75, 1].map((a, i) => (
+          <span
+            key={i}
+            className="w-3 h-3 rounded-[2px]"
+            style={{ background: `rgba(212,162,58,${0.15 + a * 0.85})` }}
+          />
+        ))}
+        <span>больше</span>
       </div>
     </div>
   );
 }
 
 export function Avatar({ idx, name }: { idx: number; name: string }) {
-  // Deterministic palette based on avatar_index
   const palette = [
     "from-gold-300 to-gold-600",
     "from-accent-mint to-emerald-700",

@@ -52,11 +52,39 @@ export type GameStakeRow = {
   updated_at: string;
 };
 
+export type BoardCell = { type: "man" | "king"; color: "white" | "black" } | null;
+export type BoardState = BoardCell[][]; // 8×8
+
+export type MoveStep = {
+  toRow: number;
+  toCol: number;
+  capturedRow: number;
+  capturedCol: number;
+};
+
+export type MoveData = {
+  fromRow: number;
+  fromCol: number;
+  finalRow: number;
+  finalCol: number;
+  steps: MoveStep[];
+  isCapture: boolean;
+  promoted: boolean;
+};
+
 export type MoveRow = {
   id: string;
   game_id: string;
   move_number: number;
   player_color: "white" | "black";
-  move_data: unknown;
+  move_data: MoveData | null;
+  board_state: BoardState | null;
+  created_at: string;
+};
+
+export type EngagementLogRow = {
+  player_id: string;
+  event_type: string;
+  payload: Record<string, unknown> | null;
   created_at: string;
 };
