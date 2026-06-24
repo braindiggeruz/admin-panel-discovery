@@ -1,4 +1,5 @@
 import { NavLink, useLocation } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Users,
@@ -9,6 +10,7 @@ import {
   LogOut,
   CircleDot,
   Telescope,
+  RefreshCw,
 } from "lucide-react";
 import { lock } from "@/lib/gate";
 import { clearSession, getSession } from "@/services/auth";
@@ -28,6 +30,7 @@ const groups = ["Наблюдение", "Аналитика", "План"] as con
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
+  const qc = useQueryClient();
   return (
     <div className="min-h-screen flex">
       {/* Sidebar */}
@@ -120,7 +123,20 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <div className="text-xs text-ink-500">
               Production · <span className="text-ink-300">shashki-royale.pages.dev</span>
             </div>
-            <CommandPalette />
+            <div className="flex items-center gap-3">
+              <button
+                onClick={async () => {
+                  qc.clear();
+                  await qc.invalidateQueries();
+                }}
+                className="px-2.5 py-1.5 rounded-lg border border-white/[0.06] text-[11px] text-ink-300 hover:bg-white/[0.04] hover:text-ink-100 inline-flex items-center gap-1.5 transition-all"
+                title="Сбросить кэш и подтянуть свежие данные из Supabase"
+                data-testid="force-sync-btn"
+              >
+                <RefreshCw className="w-3 h-3" /> Sync
+              </button>
+              <CommandPalette />
+            </div>
           </div>
         </div>
         <div className="px-10 py-8 max-w-[1400px] mx-auto">{children}</div>

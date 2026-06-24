@@ -4,3 +4,13 @@
   Referrer-Policy: same-origin
   X-Robots-Tag: noindex, nofollow
   Permissions-Policy: geolocation=(), microphone=(), camera=()
+
+/index.html
+  Cache-Control: no-store, must-revalidate
+  Pragma: no-cache
+
+/
+  Cache-Control: no-store, must-revalidate
+
+/api/*
+  Cache-Control: no-store

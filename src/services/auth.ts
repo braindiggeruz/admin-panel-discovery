@@ -126,16 +126,110 @@ export type WalletTransaction = {
   avatar_index?: number;
 };
 
+export type Stake = {
+  id: string;
+  game_id: string;
+  entry_fee: number | string;
+  pot_amount: number | string;
+  white_profile_id: string | null;
+  black_profile_id: string | null;
+  escrow_status: "waiting" | "locked" | "paid" | "refunded";
+  payout_status: "pending" | "paid" | "failed" | "refunded";
+  created_at: string;
+  updated_at: string;
+};
+
 export async function fetchPlayer360(id: string): Promise<{
-  profile: FullProfile | null;
+  profile: (FullProfile & {
+    suspended_until?: string | null;
+    suspension_reason?: string | null;
+    suspended_by?: string | null;
+  }) | null;
   wallet: Wallet | null;
   transactions: WalletTransaction[];
+  stakes: Stake[];
 }> {
   return apiFetch(`/admin/players/${id}`) as Promise<{
-    profile: FullProfile | null;
+    profile: (FullProfile & {
+      suspended_until?: string | null;
+      suspension_reason?: string | null;
+      suspended_by?: string | null;
+    }) | null;
     wallet: Wallet | null;
     transactions: WalletTransaction[];
+    stakes: Stake[];
   }>;
+}
+
+export type AuditEntry = {
+  id: number;
+  actor_email: string | null;
+  action: string;
+  target_kind: string | null;
+  target_id: string | null;
+  reason: string | null;
+  status: string;
+  error: string | null;
+  before: unknown;
+  after: unknown;
+  created_at: string;
+};
+
+export async function fetchPlayerAudit(id: string): Promise<{ rows: AuditEntry[] }> {
+  return apiFetch(`/admin/players/${id}/audit`) as Promise<{ rows: AuditEntry[] }>;
+}
+
+async function apiMutate(path: string, body: unknown): Promise<unknown> {
+  const session = getSession();
+  if (!session) throw new Error("unauthorized");
+  const r = await fetch(`${API}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${session.token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = (data as { error?: string }).error || "request_failed";
+    throw new Error(err);
+  }
+  return data;
+}
+
+export async function grantCoin(
+  profileId: string,
+  amount: number,
+  reason: string,
+): Promise<{ ok: true; result: Record<string, unknown> }> {
+  return apiMutate(`/admin/players/${profileId}/grant-coin`, {
+    amount,
+    reason,
+    idempotency_key: crypto.randomUUID(),
+  }) as Promise<{ ok: true; result: Record<string, unknown> }>;
+}
+
+export async function refundStake(
+  stakeId: string,
+  reason: string,
+): Promise<{ ok: true; result: Record<string, unknown> }> {
+  return apiMutate(`/admin/stakes/${stakeId}/refund`, {
+    reason,
+    idempotency_key: crypto.randomUUID(),
+  }) as Promise<{ ok: true; result: Record<string, unknown> }>;
+}
+
+export async function suspendPlayer(
+  profileId: string,
+  hours: number,
+  reason: string,
+): Promise<{ ok: true; result: Record<string, unknown> }> {
+  return apiMutate(`/admin/players/${profileId}/suspend`, {
+    hours,
+    reason,
+    idempotency_key: crypto.randomUUID(),
+  }) as Promise<{ ok: true; result: Record<string, unknown> }>;
 }
 
 export type WalletSummary = {

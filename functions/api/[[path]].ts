@@ -210,16 +210,245 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     const playerMatch = route.match(/^\/admin\/players\/([^/]+)$/);
     if (playerMatch && req.method === "GET") {
       const pid = playerMatch[1];
-      const [pr, wr, tr] = await Promise.all([
+      const [pr, wr, tr, sk] = await Promise.all([
         sb(env, `/rest/v1/profiles?id=eq.${pid}&limit=1`),
         sb(env, `/rest/v1/wallets?profile_id=eq.${pid}&limit=1`),
         sb(env, `/rest/v1/wallet_transactions?profile_id=eq.${pid}&order=created_at.desc&limit=50`),
+        sb(env, `/rest/v1/game_stakes?or=(white_profile_id.eq.${pid},black_profile_id.eq.${pid})&order=created_at.desc&limit=25`),
       ]);
       const profile = ((await pr.json().catch(() => [])) as unknown[])[0] ?? null;
       const wallet = ((await wr.json().catch(() => [])) as unknown[])[0] ?? null;
       const transactions = (await tr.json().catch(() => [])) as unknown[];
+      const stakes = (await sk.json().catch(() => [])) as unknown[];
       await audit(env, { actor_email: auth.email, action: "view_player", target_kind: "player", target_id: pid });
-      return json({ profile, wallet, transactions });
+      return json({ profile, wallet, transactions, stakes });
+    }
+
+    // ── Player audit history ──────────────────
+    const auditMatch = route.match(/^\/admin\/players\/([^/]+)\/audit$/);
+    if (auditMatch && req.method === "GET") {
+      const pid = auditMatch[1];
+      const r = await sb(
+        env,
+        `/rest/v1/admin_audit_log?target_kind=eq.player&target_id=eq.${pid}&order=created_at.desc&limit=50`,
+      );
+      const rows = (await r.json().catch(() => [])) as unknown[];
+      return json({ rows });
+    }
+
+    // ── ACTION: grant Coin ────────────────────
+    const grantMatch = route.match(/^\/admin\/players\/([^/]+)\/grant-coin$/);
+    if (grantMatch && req.method === "POST") {
+      const pid = grantMatch[1];
+      const body = (await req.json().catch(() => ({}))) as {
+        amount?: number;
+        reason?: string;
+        idempotency_key?: string;
+      };
+      const amount = Number(body.amount);
+      const reason = (body.reason || "").trim();
+      if (!Number.isFinite(amount) || amount === 0) {
+        return json({ error: "amount_required" }, { status: 400 });
+      }
+      if (Math.abs(amount) > 1_000_000) {
+        return json({ error: "amount_too_large" }, { status: 400 });
+      }
+      if (reason.length < 3) {
+        return json({ error: "reason_required" }, { status: 400 });
+      }
+      const idem = body.idempotency_key || crypto.randomUUID();
+
+      // Idempotency: refuse if already used
+      const dup = await sb(
+        env,
+        `/rest/v1/admin_audit_log?idempotency_key=eq.${idem}&select=id&limit=1`,
+      );
+      if ((await dup.json().catch(() => [])).length > 0) {
+        return json({ error: "duplicate_request" }, { status: 409 });
+      }
+
+      const before = await sb(env, `/rest/v1/wallets?profile_id=eq.${pid}&select=*&limit=1`);
+      const beforeRow = ((await before.json().catch(() => [])) as unknown[])[0] ?? null;
+
+      const rpc = await sb(env, "/rest/v1/rpc/admin_grant_coin", {
+        method: "POST",
+        body: JSON.stringify({
+          p_profile_id: pid,
+          p_amount: amount,
+          p_reason: reason,
+          p_actor: auth.email,
+        }),
+      });
+      const result = await rpc.json().catch(() => ({}));
+      if (!rpc.ok) {
+        await audit(env, {
+          actor_email: auth.email,
+          action: "grant_coin",
+          target_kind: "player",
+          target_id: pid,
+          reason,
+          idempotency_key: idem,
+          status: "failed",
+          error: JSON.stringify(result),
+          before: beforeRow,
+        });
+        return json({ error: "rpc_failed", detail: result }, { status: 400 });
+      }
+
+      const after = await sb(env, `/rest/v1/wallets?profile_id=eq.${pid}&select=*&limit=1`);
+      const afterRow = ((await after.json().catch(() => [])) as unknown[])[0] ?? null;
+
+      await audit(env, {
+        actor_email: auth.email,
+        action: "grant_coin",
+        target_kind: "player",
+        target_id: pid,
+        reason,
+        idempotency_key: idem,
+        before: beforeRow,
+        after: afterRow,
+      });
+      return json({ ok: true, result });
+    }
+
+    // ── ACTION: refund stake ──────────────────
+    const refundMatch = route.match(/^\/admin\/stakes\/([^/]+)\/refund$/);
+    if (refundMatch && req.method === "POST") {
+      const sid = refundMatch[1];
+      const body = (await req.json().catch(() => ({}))) as {
+        reason?: string;
+        idempotency_key?: string;
+      };
+      const reason = (body.reason || "").trim();
+      if (reason.length < 3) {
+        return json({ error: "reason_required" }, { status: 400 });
+      }
+      const idem = body.idempotency_key || crypto.randomUUID();
+      const dup = await sb(
+        env,
+        `/rest/v1/admin_audit_log?idempotency_key=eq.${idem}&select=id&limit=1`,
+      );
+      if ((await dup.json().catch(() => [])).length > 0) {
+        return json({ error: "duplicate_request" }, { status: 409 });
+      }
+
+      const before = await sb(env, `/rest/v1/game_stakes?id=eq.${sid}&select=*&limit=1`);
+      const beforeRow = ((await before.json().catch(() => [])) as unknown[])[0] ?? null;
+
+      const rpc = await sb(env, "/rest/v1/rpc/admin_refund_stake", {
+        method: "POST",
+        body: JSON.stringify({
+          p_stake_id: sid,
+          p_reason: reason,
+          p_actor: auth.email,
+        }),
+      });
+      const result = await rpc.json().catch(() => ({}));
+      if (!rpc.ok) {
+        await audit(env, {
+          actor_email: auth.email,
+          action: "refund_stake",
+          target_kind: "stake",
+          target_id: sid,
+          reason,
+          idempotency_key: idem,
+          status: "failed",
+          error: JSON.stringify(result),
+          before: beforeRow,
+        });
+        return json({ error: "rpc_failed", detail: result }, { status: 400 });
+      }
+
+      const after = await sb(env, `/rest/v1/game_stakes?id=eq.${sid}&select=*&limit=1`);
+      const afterRow = ((await after.json().catch(() => [])) as unknown[])[0] ?? null;
+
+      await audit(env, {
+        actor_email: auth.email,
+        action: "refund_stake",
+        target_kind: "stake",
+        target_id: sid,
+        reason,
+        idempotency_key: idem,
+        before: beforeRow,
+        after: afterRow,
+      });
+      return json({ ok: true, result });
+    }
+
+    // ── ACTION: suspend / unsuspend player ────
+    const suspendMatch = route.match(/^\/admin\/players\/([^/]+)\/suspend$/);
+    if (suspendMatch && req.method === "POST") {
+      const pid = suspendMatch[1];
+      const body = (await req.json().catch(() => ({}))) as {
+        hours?: number;
+        reason?: string;
+        idempotency_key?: string;
+      };
+      const hours = Number(body.hours ?? 0) | 0;
+      const reason = (body.reason || "").trim();
+      if (hours > 0 && reason.length < 3) {
+        return json({ error: "reason_required" }, { status: 400 });
+      }
+      if (hours > 24 * 365) {
+        return json({ error: "hours_too_large" }, { status: 400 });
+      }
+      const idem = body.idempotency_key || crypto.randomUUID();
+      const dup = await sb(
+        env,
+        `/rest/v1/admin_audit_log?idempotency_key=eq.${idem}&select=id&limit=1`,
+      );
+      if ((await dup.json().catch(() => [])).length > 0) {
+        return json({ error: "duplicate_request" }, { status: 409 });
+      }
+
+      const before = await sb(
+        env,
+        `/rest/v1/profiles?id=eq.${pid}&select=id,suspended_until,suspension_reason,suspended_by&limit=1`,
+      );
+      const beforeRow = ((await before.json().catch(() => [])) as unknown[])[0] ?? null;
+
+      const rpc = await sb(env, "/rest/v1/rpc/admin_set_suspension", {
+        method: "POST",
+        body: JSON.stringify({
+          p_profile_id: pid,
+          p_hours: hours,
+          p_reason: reason || null,
+          p_actor: auth.email,
+        }),
+      });
+      const result = await rpc.json().catch(() => ({}));
+      if (!rpc.ok) {
+        await audit(env, {
+          actor_email: auth.email,
+          action: hours > 0 ? "suspend_player" : "unsuspend_player",
+          target_kind: "player",
+          target_id: pid,
+          reason,
+          idempotency_key: idem,
+          status: "failed",
+          error: JSON.stringify(result),
+          before: beforeRow,
+        });
+        return json({ error: "rpc_failed", detail: result }, { status: 400 });
+      }
+
+      const after = await sb(
+        env,
+        `/rest/v1/profiles?id=eq.${pid}&select=id,suspended_until,suspension_reason,suspended_by&limit=1`,
+      );
+      const afterRow = ((await after.json().catch(() => [])) as unknown[])[0] ?? null;
+
+      await audit(env, {
+        actor_email: auth.email,
+        action: hours > 0 ? "suspend_player" : "unsuspend_player",
+        target_kind: "player",
+        target_id: pid,
+        reason,
+        idempotency_key: idem,
+        before: beforeRow,
+        after: afterRow,
+      });
+      return json({ ok: true, result });
     }
 
     // ── Wallets summary ───────────────────────
