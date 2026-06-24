@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    font-family: "Geist", ui-sans-serif, system-ui;
+    background:
+      radial-gradient(1200px 700px at 85% -10%, rgba(212, 162, 58, 0.07), transparent 60%),
+      radial-gradient(900px 500px at -10% 100%, rgba(91, 211, 169, 0.04), transparent 60%),
+      #07070a;
+    background-attachment: fixed;
+  }
+  ::selection {
+    background: #d4a23a;
+    color: #0b0b10;
+  }
+  /* Custom scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #262633; border-radius: 8px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
+  ::-webkit-scrollbar-track { background: transparent; }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-white/[0.06] bg-ink-900/60 backdrop-blur-xl shadow-innerline;
+  }
+  .panel-soft {
+    @apply rounded-xl border border-white/[0.04] bg-white/[0.015];
+  }
+  .kpi {
+    @apply panel relative overflow-hidden p-6;
+  }
+  .kpi::before {
+    content: "";
+    @apply absolute inset-0 opacity-[0.04] pointer-events-none bg-grain;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium tracking-tight transition-all;
+  }
+  .btn-gold {
+    @apply btn bg-gold-300 text-ink-950 hover:bg-gold-200 active:translate-y-[1px];
+  }
+  .btn-ghost {
+    @apply btn border border-white/10 text-ink-100 hover:bg-white/[0.04];
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium uppercase tracking-[0.08em] border;
+  }
+  .chip-gold { @apply chip bg-gold-300/10 border-gold-300/30 text-gold-200; }
+  .chip-mint { @apply chip bg-accent-mint/10 border-accent-mint/30 text-accent-mint; }
+  .chip-rose { @apply chip bg-accent-rose/10 border-accent-rose/30 text-accent-rose; }
+  .chip-sky  { @apply chip bg-accent-sky/10  border-accent-sky/30  text-accent-sky;  }
+  .chip-mute { @apply chip bg-white/[0.03] border-white/10 text-ink-400; }
+
+  .row-hover { @apply transition-colors hover:bg-white/[0.025]; }
+
+  .display-title {
+    font-family: "Fraunces", serif;
+    font-feature-settings: "ss01" on, "ss02" on;
+    letter-spacing: -0.02em;
+  }
+  .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+}
+
+/* Recharts theming */
+.recharts-cartesian-axis-tick text { fill: #5a5a6e; font-size: 11px; }
+.recharts-cartesian-grid line { stroke: rgba(255,255,255,0.04); }
+.recharts-tooltip-wrapper { outline: none; }
