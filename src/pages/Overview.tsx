@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import {
   AreaChart,
   Area,
@@ -19,6 +20,7 @@ import {
   ArrowUpRight,
   Wifi,
   CircleDot,
+  Radio,
 } from "lucide-react";
 import {
   fetchActiveUsers,
@@ -36,29 +38,39 @@ import { Kpi, PageHeader, Section, Skeleton, Empty } from "@/components/ui";
 import { Link } from "react-router-dom";
 import { GAME_URL } from "@/lib/supabase";
 import { useRealtimeTable } from "@/lib/realtime";
+import CountUp from "@/components/CountUp";
+import LiveFeed from "@/components/LiveFeed";
+import { useToast } from "@/components/Toast";
 
 export default function Overview() {
   const qc = useQueryClient();
+  const toast = useToast();
+  const knownPlayers = useRef<number | null>(null);
+  const knownActiveGames = useRef<number | null>(null);
 
   // Realtime: when games or moves change, invalidate everything
   useRealtimeTable("games", () => {
     qc.invalidateQueries({ queryKey: ["games", "active"] });
     qc.invalidateQueries({ queryKey: ["games", "recent"] });
     qc.invalidateQueries({ queryKey: ["totals"] });
+    qc.invalidateQueries({ queryKey: ["activity-feed"] });
   });
   useRealtimeTable("moves", () => {
     qc.invalidateQueries({ queryKey: ["games", "active"] });
     qc.invalidateQueries({ queryKey: ["totals"] });
+    qc.invalidateQueries({ queryKey: ["activity-feed"] });
   });
   useRealtimeTable("public_profiles", () => {
     qc.invalidateQueries({ queryKey: ["active-users"] });
+    qc.invalidateQueries({ queryKey: ["totals"] });
+    qc.invalidateQueries({ queryKey: ["activity-feed"] });
   });
 
-  const totals = useQuery({ queryKey: ["totals"], queryFn: fetchTotals, refetchInterval: 30_000 });
+  const totals = useQuery({ queryKey: ["totals"], queryFn: fetchTotals, refetchInterval: 15_000 });
   const activeUsers = useQuery({
     queryKey: ["active-users"],
     queryFn: fetchActiveUsers,
-    refetchInterval: 30_000,
+    refetchInterval: 15_000,
   });
   const funnel = useQuery({ queryKey: ["funnel"], queryFn: fetchFunnel, refetchInterval: 60_000 });
   const heatmap = useQuery({
@@ -66,24 +78,59 @@ export default function Overview() {
     queryFn: () => fetchActivityHeatmap(14),
     refetchInterval: 60_000,
   });
-  const signup = useQuery({ queryKey: ["signup-trend"], queryFn: () => fetchSignupTrend(14) });
-  const games = useQuery({ queryKey: ["games-trend"], queryFn: () => fetchGamesTrend(14) });
+  const signup = useQuery({ queryKey: ["signup-trend"], queryFn: () => fetchSignupTrend(14), refetchInterval: 60_000 });
+  const games = useQuery({ queryKey: ["games-trend"], queryFn: () => fetchGamesTrend(14), refetchInterval: 60_000 });
   const top = useQuery({
     queryKey: ["players", "top"],
     queryFn: () => fetchPlayers({ sort: "rating", dir: "desc", limit: 6 }),
+    refetchInterval: 60_000,
   });
   const live = useQuery({
     queryKey: ["games", "active"],
     queryFn: () => fetchGames({ status: "playing", limit: 8 }),
+    refetchInterval: 15_000,
   });
   const recent = useQuery({
     queryKey: ["games", "recent"],
     queryFn: () => fetchGames({ status: "finished", limit: 6 }),
+    refetchInterval: 30_000,
   });
   const stakes = useQuery({
     queryKey: ["stakes", "recent"],
     queryFn: () => fetchStakes({ limit: 200 }),
+    refetchInterval: 60_000,
   });
+
+  // Toast: notify when total players grows
+  useEffect(() => {
+    const c = totals.data?.players;
+    if (c === undefined) return;
+    if (knownPlayers.current !== null && c > knownPlayers.current) {
+      const delta = c - knownPlayers.current;
+      toast.push({
+        kind: "new-player",
+        title: delta === 1 ? "Новый игрок зарегистрирован" : `+${delta} новых игроков`,
+        description: `Всего теперь ${fmtNum(c)}`,
+        href: "/players",
+      });
+    }
+    knownPlayers.current = c;
+  }, [totals.data?.players, toast]);
+
+  // Toast: notify when a new game appears (active count grows)
+  useEffect(() => {
+    const c = totals.data?.active;
+    if (c === undefined) return;
+    if (knownActiveGames.current !== null && c > knownActiveGames.current) {
+      toast.push({
+        kind: "new-game",
+        title: "Началась новая партия",
+        description: `Активных сейчас: ${fmtNum(c)}`,
+        href: "/matches",
+      });
+    }
+    knownActiveGames.current = c;
+  }, [totals.data?.active, toast]);
 
   const t = totals.data;
   const totalPot = (stakes.data ?? []).reduce((s, x) => s + Number(x.pot_amount || 0), 0);
@@ -125,10 +172,10 @@ export default function Overview() {
         <Kpi
           icon={<Users className="w-4 h-4" />}
           label="Игроки"
-          value={totals.isLoading ? "…" : fmtNum(t?.players ?? 0)}
+          value={<CountUp value={t?.players} />}
           hint={
             <span>
-              <span className="text-accent-mint">{fmtNum(t?.playedAtLeastOnce ?? 0)}</span>{" "}
+              <CountUp value={t?.playedAtLeastOnce} className="text-accent-mint" />{" "}
               сыграли хотя бы 1 партию
             </span>
           }
@@ -137,12 +184,12 @@ export default function Overview() {
         <Kpi
           icon={<Wifi className="w-4 h-4" />}
           label="Активность"
-          value={activeUsers.isLoading ? "…" : fmtNum(activeUsers.data?.d1 ?? 0)}
+          value={<CountUp value={activeUsers.data?.d1} />}
           hint={
             <span>
               <span className="text-accent-mint">DAU</span> ·{" "}
-              {fmtNum(activeUsers.data?.d7 ?? 0)} <span className="text-ink-500">WAU</span> ·{" "}
-              {fmtNum(activeUsers.data?.d30 ?? 0)} <span className="text-ink-500">MAU</span>
+              <CountUp value={activeUsers.data?.d7} /> <span className="text-ink-500">WAU</span> ·{" "}
+              <CountUp value={activeUsers.data?.d30} /> <span className="text-ink-500">MAU</span>
             </span>
           }
           tone="mint"
@@ -150,24 +197,25 @@ export default function Overview() {
         <Kpi
           icon={<Swords className="w-4 h-4" />}
           label="Партии всего"
-          value={totals.isLoading ? "…" : fmtNum(t?.games ?? 0)}
+          value={<CountUp value={t?.games} />}
           hint={
             <span>
               <span className={liveCount > 0 ? "text-accent-mint" : "text-ink-400"}>
-                {fmtNum(liveCount)}
+                <CountUp value={liveCount} />
               </span>{" "}
-              сейчас · {fmtNum(t?.finished ?? 0)} завершено
+              сейчас · <CountUp value={t?.finished} /> завершено
             </span>
           }
         />
         <Kpi
           icon={<Coins className="w-4 h-4" />}
           label="Coin в обороте"
-          value={fmtCoin(totalPot)}
+          value={<CountUp value={totalPot} format={fmtCoin} />}
           hint={
             <span>
-              комиссия ≈ <span className="text-gold-300 mono">{fmtCoin(commission)}</span> по{" "}
-              {fmtNum(t?.stakes ?? 0)} ставочным играм
+              комиссия ≈{" "}
+              <CountUp value={commission} format={fmtCoin} className="text-gold-300 mono" /> по{" "}
+              <CountUp value={t?.stakes} /> ставочным играм
             </span>
           }
           tone="gold"
@@ -265,17 +313,38 @@ export default function Overview() {
         </Section>
       </div>
 
-      {/* Activity heatmap */}
-      <Section
-        title="Когда играют"
-        description="Тепловая карта ходов по дням недели и часам (14 дней, UTC)"
-      >
-        {heatmap.isLoading ? (
-          <Skeleton rows={7} />
-        ) : (
-          <Heatmap data={heatmap.data ?? []} />
-        )}
-      </Section>
+      {/* Activity heatmap + Live feed */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2">
+          <Section
+            title="Когда играют"
+            description="Тепловая карта ходов по дням и часам (14 дней, UTC)"
+            right={
+              <span className="chip-gold">
+                <Activity className="w-3 h-3" /> heatmap
+              </span>
+            }
+          >
+            {heatmap.isLoading ? (
+              <Skeleton rows={7} />
+            ) : (
+              <Heatmap data={heatmap.data ?? []} />
+            )}
+          </Section>
+        </div>
+
+        <Section
+          title="Лента событий"
+          description="Регистрации, ходы и финалы"
+          right={
+            <span className="chip-mint">
+              <Radio className="w-3 h-3 animate-pulse" /> live
+            </span>
+          }
+        >
+          <LiveFeed />
+        </Section>
+      </div>
 
       {/* 3-col bottom */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

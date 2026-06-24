@@ -10,6 +10,7 @@ import MatchDetail from "@/pages/MatchDetail";
 import Economy from "@/pages/Economy";
 import SystemHealth from "@/pages/SystemHealth";
 import Roadmap from "@/pages/Roadmap";
+import Insights from "@/pages/Insights";
 import { isUnlocked } from "@/lib/gate";
 
 export default function App() {
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/matches" element={<Matches />} />
         <Route path="/matches/:id" element={<MatchDetail />} />
         <Route path="/economy" element={<Economy />} />
+        <Route path="/insights" element={<Insights />} />
         <Route path="/health" element={<SystemHealth />} />
         <Route path="/roadmap" element={<Roadmap />} />
         <Route path="*" element={<Navigate to="/overview" replace />} />

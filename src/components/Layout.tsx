@@ -8,6 +8,7 @@ import {
   Compass,
   LogOut,
   CircleDot,
+  Telescope,
 } from "lucide-react";
 import { lock } from "@/lib/gate";
 import CommandPalette from "@/components/CommandPalette";
@@ -16,6 +17,7 @@ const nav = [
   { to: "/overview", label: "Обзор", icon: LayoutDashboard, group: "Наблюдение" },
   { to: "/players", label: "Игроки", icon: Users, group: "Наблюдение" },
   { to: "/matches", label: "Матчи", icon: Swords, group: "Наблюдение" },
+  { to: "/insights", label: "Инсайты", icon: Telescope, group: "Аналитика" },
   { to: "/economy", label: "Экономика", icon: Coins, group: "Аналитика" },
   { to: "/health", label: "Система", icon: HeartPulse, group: "Аналитика" },
   { to: "/roadmap", label: "Roadmap", icon: Compass, group: "План" },

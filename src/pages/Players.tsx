@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { Search, Users, Download, Filter, X } from "lucide-react";
 import { fetchPlayers, type PlayersQuery } from "@/services/admin";
 import { fmtNum, fmtRelative, clsx } from "@/lib/format";
 import { Empty, PageHeader, Section, Skeleton } from "@/components/ui";
 import { Avatar } from "@/pages/Overview";
+import { useRealtimeTable } from "@/lib/realtime";
 import type { PublicProfile } from "@/lib/types";
 
 const SORT_OPTIONS = [
@@ -44,7 +45,13 @@ export default function Players() {
     queryKey: ["players", query],
     queryFn: () => fetchPlayers(query),
     placeholderData: (prev) => prev,
+    refetchInterval: 20_000,
   });
+
+  const qc = useQueryClient();
+  useRealtimeTable("public_profiles", () =>
+    qc.invalidateQueries({ queryKey: ["players"] }),
+  );
 
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
