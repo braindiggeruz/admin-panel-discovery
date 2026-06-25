@@ -650,6 +650,365 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       return json({ rows: out }, req, env);
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // ADMIN READ ENDPOINTS — replace direct anon reads from admin SPA.
+    // All routes below run under service_role (server-side), bypass RLS,
+    // and return safe-shape data only. They REQUIRE a valid admin JWT
+    // because they sit below the auth gate.
+    // ──────────────────────────────────────────────────────────────────
+
+    const countOf = async (path: string): Promise<number> => {
+      const r = await sb(env, path, { headers: { Prefer: "count=exact", Range: "0-0" } });
+      const cr = r.headers.get("content-range") || "0-0/0";
+      const m = cr.match(/\/(\d+|\*)$/);
+      return m && m[1] !== "*" ? parseInt(m[1], 10) : 0;
+    };
+
+    // /api/admin/overview — bundled KPIs (totals + active-users + funnel)
+    if (route === "/admin/overview" && req.method === "GET") {
+      const now = Date.now();
+      const cuts = {
+        on5:  new Date(now - 5 * 60_000).toISOString(),
+        d1:   new Date(now - 86_400_000).toISOString(),
+        d7:   new Date(now - 7 * 86_400_000).toISOString(),
+        d30:  new Date(now - 30 * 86_400_000).toISOString(),
+      };
+      const [
+        players, played, games, active, finished, stakes, moves,
+        on5, d1, d7, d30, p1, p5,
+      ] = await Promise.all([
+        countOf("/rest/v1/public_profiles?select=id"),
+        countOf("/rest/v1/public_profiles?select=id&total_games=gt.0"),
+        countOf("/rest/v1/games?select=id"),
+        countOf("/rest/v1/games?select=id&status=in.(waiting,playing)"),
+        countOf("/rest/v1/games?select=id&status=eq.finished"),
+        countOf("/rest/v1/game_stakes?select=id"),
+        countOf("/rest/v1/moves?select=id"),
+        countOf(`/rest/v1/public_profiles?select=id&last_seen_at=gte.${encodeURIComponent(cuts.on5)}`),
+        countOf(`/rest/v1/public_profiles?select=id&last_seen_at=gte.${encodeURIComponent(cuts.d1)}`),
+        countOf(`/rest/v1/public_profiles?select=id&last_seen_at=gte.${encodeURIComponent(cuts.d7)}`),
+        countOf(`/rest/v1/public_profiles?select=id&last_seen_at=gte.${encodeURIComponent(cuts.d30)}`),
+        countOf("/rest/v1/public_profiles?select=id&total_games=gte.1"),
+        countOf("/rest/v1/public_profiles?select=id&total_games=gte.5"),
+      ]);
+      const stR = await sb(env, "/rest/v1/game_stakes?select=white_profile_id,black_profile_id&limit=20000");
+      const stakeIds = new Set<string>();
+      for (const s of (await stR.json().catch(() => [])) as Array<{ white_profile_id: string | null; black_profile_id: string | null }>) {
+        if (s.white_profile_id) stakeIds.add(s.white_profile_id);
+        if (s.black_profile_id) stakeIds.add(s.black_profile_id);
+      }
+      return json({
+        totals: { players, games, active, finished, stakes, movesSeen: moves, playedAtLeastOnce: played },
+        activeUsers: { online5m: on5, d1, d7, d30 },
+        funnel: { registered: players, played1: p1, played5: p5, stake1: stakeIds.size },
+      }, req, env);
+    }
+
+    // /api/admin/signup-trend?days=14
+    if (route === "/admin/signup-trend" && req.method === "GET") {
+      const days = Math.min(Math.max(parseInt(url.searchParams.get("days") || "14", 10) || 14, 1), 90);
+      const since = new Date(Date.now() - days * 86_400_000).toISOString();
+      const r = await sb(env, `/rest/v1/public_profiles?select=created_at&created_at=gte.${encodeURIComponent(since)}&order=created_at.asc&limit=20000`);
+      const rows = (await r.json().catch(() => [])) as Array<{ created_at: string }>;
+      const bucket = new Map<string, number>();
+      for (let i = days - 1; i >= 0; i--) bucket.set(new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10), 0);
+      for (const x of rows) {
+        const k = (x.created_at || "").slice(0, 10);
+        if (bucket.has(k)) bucket.set(k, (bucket.get(k) ?? 0) + 1);
+      }
+      return json({ rows: Array.from(bucket, ([day, count]) => ({ day, count })) }, req, env);
+    }
+
+    // /api/admin/games-trend?days=14
+    if (route === "/admin/games-trend" && req.method === "GET") {
+      const days = Math.min(Math.max(parseInt(url.searchParams.get("days") || "14", 10) || 14, 1), 90);
+      const since = new Date(Date.now() - days * 86_400_000).toISOString();
+      const r = await sb(env, `/rest/v1/games?select=updated_at,status&updated_at=gte.${encodeURIComponent(since)}&order=updated_at.asc&limit=50000`);
+      const rows = (await r.json().catch(() => [])) as Array<{ updated_at: string; status: string }>;
+      const bucket = new Map<string, number>();
+      for (let i = days - 1; i >= 0; i--) bucket.set(new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10), 0);
+      for (const x of rows) {
+        if (x.status !== "finished") continue;
+        const k = (x.updated_at || "").slice(0, 10);
+        if (bucket.has(k)) bucket.set(k, (bucket.get(k) ?? 0) + 1);
+      }
+      return json({ rows: Array.from(bucket, ([day, count]) => ({ day, count })) }, req, env);
+    }
+
+    // /api/admin/activity-heatmap?days=14
+    if (route === "/admin/activity-heatmap" && req.method === "GET") {
+      const days = Math.min(Math.max(parseInt(url.searchParams.get("days") || "14", 10) || 14, 1), 60);
+      const since = new Date(Date.now() - days * 86_400_000).toISOString();
+      const r = await sb(env, `/rest/v1/moves?select=created_at&created_at=gte.${encodeURIComponent(since)}&limit=50000`);
+      const rows = (await r.json().catch(() => [])) as Array<{ created_at: string }>;
+      const grid: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+      for (const x of rows) {
+        const d = new Date(x.created_at);
+        const dow = (d.getUTCDay() + 6) % 7;
+        grid[dow][d.getUTCHours()] += 1;
+      }
+      return json({ grid }, req, env);
+    }
+
+    // /api/admin/players-list?sort=&dir=&limit=&offset=&search=&hasGames=&minGames=&minStreak=&active24h=
+    if (route === "/admin/players-list" && req.method === "GET") {
+      const sort = url.searchParams.get("sort") || "last_seen_at";
+      const dir = url.searchParams.get("dir") === "asc" ? "asc" : "desc";
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 1), 200);
+      const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10) || 0, 0);
+      const search = url.searchParams.get("search") || "";
+      const hasGames = url.searchParams.get("hasGames") === "true";
+      const minGames = parseInt(url.searchParams.get("minGames") || "0", 10) || 0;
+      const minStreak = parseInt(url.searchParams.get("minStreak") || "0", 10) || 0;
+      const active24h = url.searchParams.get("active24h") === "true";
+      const SORT_OK = ["rating", "last_seen_at", "created_at", "total_games", "win_streak", "best_win_streak"];
+      if (!SORT_OK.includes(sort)) return json({ error: "bad_sort" }, req, env, { status: 400 });
+
+      const params: string[] = [`select=*`, `order=${sort}.${dir}`];
+      if (search) params.push(`nickname=ilike.${encodeURIComponent("*" + search + "*")}`);
+      if (hasGames) params.push(`total_games=gt.0`);
+      if (minGames > 0) params.push(`total_games=gte.${minGames}`);
+      if (minStreak > 0) params.push(`best_win_streak=gte.${minStreak}`);
+      if (active24h) params.push(`last_seen_at=gte.${encodeURIComponent(new Date(Date.now() - 86_400_000).toISOString())}`);
+      const r = await sb(env, `/rest/v1/public_profiles?${params.join("&")}`, {
+        headers: { Prefer: "count=exact", Range: `${offset}-${offset + limit - 1}` },
+      });
+      const rows = (await r.json().catch(() => [])) as unknown[];
+      const total = (() => {
+        const cr = r.headers.get("content-range") || "0-0/0";
+        const m = cr.match(/\/(\d+|\*)$/);
+        return m && m[1] !== "*" ? parseInt(m[1], 10) : 0;
+      })();
+      return json({ rows, total }, req, env);
+    }
+
+    // /api/admin/player-public/:id — single public_profiles row
+    const playerPub = route.match(/^\/admin\/player-public\/([^/]+)$/);
+    if (playerPub && req.method === "GET") {
+      const pid = playerPub[1];
+      if (!UUID_RE.test(pid)) return json({ error: "bad_id" }, req, env, { status: 400 });
+      const r = await sb(env, `/rest/v1/public_profiles?id=eq.${pid}&select=*&limit=1`);
+      const row = ((await r.json().catch(() => [])) as unknown[])[0] ?? null;
+      return json({ row }, req, env);
+    }
+
+    // /api/admin/player-games/:id?limit=25
+    const playerGames = route.match(/^\/admin\/player-games\/([^/]+)$/);
+    if (playerGames && req.method === "GET") {
+      const pid = playerGames[1];
+      if (!UUID_RE.test(pid)) return json({ error: "bad_id" }, req, env, { status: 400 });
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "25", 10) || 25, 1), 200);
+      const r = await sb(env, `/rest/v1/games?select=*&or=(white_player_id.eq.${pid},black_player_id.eq.${pid})&order=updated_at.desc&limit=${limit}`);
+      const rows = (await r.json().catch(() => [])) as unknown[];
+      return json({ rows }, req, env);
+    }
+
+    // /api/admin/player-stakes/:id?limit=25
+    const playerStakes = route.match(/^\/admin\/player-stakes\/([^/]+)$/);
+    if (playerStakes && req.method === "GET") {
+      const pid = playerStakes[1];
+      if (!UUID_RE.test(pid)) return json({ error: "bad_id" }, req, env, { status: 400 });
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "25", 10) || 25, 1), 200);
+      const r = await sb(env, `/rest/v1/game_stakes?select=*&or=(white_profile_id.eq.${pid},black_profile_id.eq.${pid})&order=created_at.desc&limit=${limit}`);
+      const rows = (await r.json().catch(() => [])) as unknown[];
+      return json({ rows }, req, env);
+    }
+
+    // /api/admin/player-engagement/:id?limit=50
+    const playerEng = route.match(/^\/admin\/player-engagement\/([^/]+)$/);
+    if (playerEng && req.method === "GET") {
+      const pid = playerEng[1];
+      if (!UUID_RE.test(pid)) return json({ error: "bad_id" }, req, env, { status: 400 });
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 1), 500);
+      const r = await sb(env, `/rest/v1/engagement_log?select=*&player_id=eq.${pid}&order=created_at.desc&limit=${limit}`);
+      const rows = (await r.json().catch(() => [])) as unknown[];
+      return json({ rows }, req, env);
+    }
+
+    // /api/admin/games-list?status=playing&limit=8
+    if (route === "/admin/games-list" && req.method === "GET") {
+      const status = url.searchParams.get("status") || "all";
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 1), 500);
+      const STATUS_OK = ["waiting", "playing", "finished", "all"];
+      if (!STATUS_OK.includes(status)) return json({ error: "bad_status" }, req, env, { status: 400 });
+      const filter = status !== "all" ? `&status=eq.${status}` : "";
+      const r = await sb(env,
+        `/rest/v1/games?select=id,room_code,status,white_player_id,black_player_id,current_turn,move_number,winner,resign_reason,created_at,updated_at,last_move_at${filter}&order=updated_at.desc&limit=${limit}`);
+      const rows = (await r.json().catch(() => [])) as unknown[];
+      return json({ rows }, req, env);
+    }
+
+    // /api/admin/game/:id  (single row + moves)
+    const gameOne = route.match(/^\/admin\/game\/([^/]+)$/);
+    if (gameOne && req.method === "GET") {
+      const gid = gameOne[1];
+      if (!UUID_RE.test(gid)) return json({ error: "bad_id" }, req, env, { status: 400 });
+      const [gr, mr] = await Promise.all([
+        sb(env, `/rest/v1/games?id=eq.${gid}&select=*&limit=1`),
+        sb(env, `/rest/v1/moves?select=*&game_id=eq.${gid}&order=move_number.asc&limit=2000`),
+      ]);
+      const game = ((await gr.json().catch(() => [])) as unknown[])[0] ?? null;
+      const moves = (await mr.json().catch(() => [])) as unknown[];
+      return json({ game, moves }, req, env);
+    }
+
+    // /api/admin/stakes-list?limit=200
+    if (route === "/admin/stakes-list" && req.method === "GET") {
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "200", 10) || 200, 1), 2000);
+      const r = await sb(env, `/rest/v1/game_stakes?select=*&order=created_at.desc&limit=${limit}`);
+      const rows = (await r.json().catch(() => [])) as unknown[];
+      return json({ rows }, req, env);
+    }
+
+    // /api/admin/profiles-by-ids — POST {ids:[...]}
+    if (route === "/admin/profiles-by-ids" && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as { ids?: string[] };
+      const ids = Array.from(new Set((body.ids ?? []).filter((s) => UUID_RE.test(s)))).slice(0, 500);
+      if (ids.length === 0) return json({ map: {} }, req, env);
+      const r = await sb(env, `/rest/v1/public_profiles?select=*&id=in.(${ids.join(",")})`);
+      const rows = (await r.json().catch(() => [])) as Array<{ id: string }>;
+      const map: Record<string, unknown> = {};
+      for (const p of rows) map[p.id] = p;
+      return json({ map }, req, env);
+    }
+
+    // /api/admin/search?q=...
+    if (route === "/admin/search" && req.method === "GET") {
+      const q = (url.searchParams.get("q") || "").trim();
+      if (!q) return json({ players: [], games: [] }, req, env);
+      const isUUID = UUID_RE.test(q);
+      const [pR, gR] = await Promise.all([
+        isUUID
+          ? sb(env, `/rest/v1/public_profiles?id=eq.${q}&select=*&limit=5`)
+          : sb(env, `/rest/v1/public_profiles?nickname=ilike.${encodeURIComponent("*" + q + "*")}&select=*&order=last_seen_at.desc&limit=8`),
+        isUUID
+          ? sb(env, `/rest/v1/games?id=eq.${q}&select=*&limit=5`)
+          : sb(env, `/rest/v1/games?room_code=ilike.${encodeURIComponent("*" + q.toUpperCase() + "*")}&select=*&order=updated_at.desc&limit=8`),
+      ]);
+      const players = (await pR.json().catch(() => [])) as unknown[];
+      const games = (await gR.json().catch(() => [])) as unknown[];
+      return json({ players, games }, req, env);
+    }
+
+    // /api/admin/activity-feed?limit=20
+    if (route === "/admin/activity-feed" && req.method === "GET") {
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 1), 100);
+      const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+      const [pR, gR, mR] = await Promise.all([
+        sb(env, `/rest/v1/public_profiles?select=id,nickname,avatar_index,created_at&created_at=gte.${encodeURIComponent(since)}&order=created_at.desc&limit=${limit}`),
+        sb(env, `/rest/v1/games?select=id,room_code,status,winner,created_at,updated_at&order=updated_at.desc&limit=${limit}`),
+        sb(env, `/rest/v1/moves?select=game_id,move_number,player_color,created_at&order=created_at.desc&limit=${limit}`),
+      ]);
+      const profs = (await pR.json().catch(() => [])) as Array<{ id: string; nickname: string; avatar_index: number; created_at: string }>;
+      const games = (await gR.json().catch(() => [])) as Array<{ id: string; room_code: string; status: string; winner: string | null; created_at: string; updated_at: string }>;
+      const moves = (await mR.json().catch(() => [])) as Array<{ game_id: string; move_number: number; player_color: string; created_at: string }>;
+      const codeMap = new Map<string, string>();
+      for (const g of games) codeMap.set(g.id, g.room_code);
+      const out: Array<Record<string, unknown>> = [];
+      for (const p of profs) out.push({ kind: "registration", at: p.created_at, player: { id: p.id, nickname: p.nickname, avatar_index: p.avatar_index } });
+      for (const g of games) {
+        if (g.status === "finished") out.push({ kind: "game_finished", at: g.updated_at, gameId: g.id, roomCode: g.room_code, winner: g.winner });
+        else out.push({ kind: "game_started", at: g.created_at, gameId: g.id, roomCode: g.room_code });
+      }
+      for (const m of moves) out.push({ kind: "move", at: m.created_at, gameId: m.game_id, roomCode: codeMap.get(m.game_id) ?? "—", color: m.player_color, moveNumber: m.move_number });
+      out.sort((a, b) => +new Date(b.at as string) - +new Date(a.at as string));
+      return json({ rows: out.slice(0, limit) }, req, env);
+    }
+
+    // /api/admin/insights — anti-fraud / behavioural digest
+    if (route === "/admin/insights" && req.method === "GET") {
+      const r = await sb(env, "/rest/v1/public_profiles?select=*&order=rating.desc&limit=5000");
+      const all = (await r.json().catch(() => [])) as Array<{
+        id: string; rating: number; total_games: number; wins: number; best_win_streak: number;
+        last_seen_at: string; created_at: string;
+      }>;
+      const cutoff = Date.now() - 14 * 86_400_000;
+      const highWinrate = all
+        .filter((p) => p.total_games >= 20 && p.wins / Math.max(1, p.total_games) >= 0.9)
+        .map((p) => ({ ...p, winrate: Math.round((p.wins / p.total_games) * 100) }))
+        .slice(0, 10);
+      const longestStreaks = all
+        .filter((p) => (p.best_win_streak ?? 0) >= 5)
+        .sort((a, b) => (b.best_win_streak ?? 0) - (a.best_win_streak ?? 0))
+        .slice(0, 10);
+      const inactiveButRated = all
+        .filter((p) => new Date(p.last_seen_at).getTime() < cutoff && p.total_games >= 10 && p.rating > 1200)
+        .sort((a, b) => b.rating - a.rating).slice(0, 10);
+      const groups = new Map<string, typeof all>();
+      for (const p of all) {
+        const sec = (p.created_at || "").slice(0, 19);
+        if (!sec) continue;
+        if (!groups.has(sec)) groups.set(sec, []);
+        groups.get(sec)!.push(p);
+      }
+      const sameSecondSignups = Array.from(groups.entries())
+        .filter(([, list]) => list.length >= 3)
+        .map(([bucket, players]) => ({ bucket, count: players.length, players }))
+        .sort((a, b) => b.count - a.count).slice(0, 5);
+      const ratings = all.map((p) => p.rating);
+      const mean = ratings.reduce((s, n) => s + n, 0) / Math.max(1, ratings.length);
+      const variance = ratings.reduce((s, n) => s + (n - mean) ** 2, 0) / Math.max(1, ratings.length);
+      const sigma = Math.sqrt(variance);
+      const ratingOutliers = all
+        .filter((p) => Math.abs(p.rating - mean) > 2 * sigma)
+        .sort((a, b) => Math.abs(b.rating - mean) - Math.abs(a.rating - mean)).slice(0, 10);
+      const zero = all.filter((p) => p.total_games === 0).length;
+      return json({
+        highWinrate, longestStreaks, inactiveButRated, sameSecondSignups, ratingOutliers,
+        zeroGames: { total: zero, pct: all.length ? Math.round((zero / all.length) * 1000) / 10 : 0 },
+      }, req, env);
+    }
+
+    // /api/admin/economy/daily?days=30
+    if (route === "/admin/economy/daily" && req.method === "GET") {
+      const days = Math.min(Math.max(parseInt(url.searchParams.get("days") || "30", 10) || 30, 1), 180);
+      const since = new Date(Date.now() - days * 86_400_000).toISOString();
+      const r = await sb(env, `/rest/v1/game_stakes?select=created_at,updated_at,entry_fee,pot_amount,payout_status&created_at=gte.${encodeURIComponent(since)}&limit=50000`);
+      const rows = (await r.json().catch(() => [])) as Array<{ created_at: string; pot_amount: string | number; payout_status: string }>;
+      const bucket = new Map<string, { day: string; pot: number; paid: number; refunded: number; commission: number }>();
+      for (let i = days - 1; i >= 0; i--) {
+        const k = new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10);
+        bucket.set(k, { day: k, pot: 0, paid: 0, refunded: 0, commission: 0 });
+      }
+      for (const s of rows) {
+        const k = (s.created_at || "").slice(0, 10);
+        const row = bucket.get(k); if (!row) continue;
+        const pot = Number(s.pot_amount || 0);
+        row.pot += pot;
+        if (s.payout_status === "paid") { row.paid += pot; row.commission += pot * 0.05; }
+        else if (s.payout_status === "refunded") row.refunded += pot;
+      }
+      return json({ rows: Array.from(bucket.values()).map((r) => ({ ...r, commission: Math.round(r.commission) })) }, req, env);
+    }
+
+    // /api/admin/economy/top-wagerers?limit=10
+    if (route === "/admin/economy/top-wagerers" && req.method === "GET") {
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "10", 10) || 10, 1), 50);
+      const r = await sb(env, "/rest/v1/game_stakes?select=entry_fee,white_profile_id,black_profile_id&limit=20000");
+      const rows = (await r.json().catch(() => [])) as Array<{ entry_fee: string | number; white_profile_id: string | null; black_profile_id: string | null }>;
+      const acc = new Map<string, { wagered: number; count: number }>();
+      for (const s of rows) {
+        const fee = Number(s.entry_fee || 0);
+        for (const pid of [s.white_profile_id, s.black_profile_id]) {
+          if (!pid) continue;
+          const prev = acc.get(pid) ?? { wagered: 0, count: 0 };
+          acc.set(pid, { wagered: prev.wagered + fee, count: prev.count + 1 });
+        }
+      }
+      const top = Array.from(acc.entries()).sort((a, b) => b[1].wagered - a[1].wagered).slice(0, limit);
+      if (top.length === 0) return json({ rows: [] }, req, env);
+      const ids = top.map(([id]) => id);
+      const pR = await sb(env, `/rest/v1/public_profiles?select=*&id=in.(${ids.join(",")})`);
+      const profs = (await pR.json().catch(() => [])) as Array<{ id: string }>;
+      const map: Record<string, unknown> = {};
+      for (const p of profs) map[p.id] = p;
+      return json({
+        rows: top.filter(([id]) => map[id]).map(([id, { wagered, count }]) => ({
+          profile: map[id], totalWagered: wagered, games: count,
+        })),
+      }, req, env);
+    }
+
     return json({ error: "not_found" }, req, env, { status: 404 });
   } catch (err) {
     // Never echo raw error text to the client (FIND-041).
